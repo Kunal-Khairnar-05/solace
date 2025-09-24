@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import 'dart:ui'; // Required for ImageFilter.blur
+import 'dart:convert';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:http/http.dart' as http;
+import '../../services/elevenlabs_service.dart'; // Import the new service
+import 'package:google_gemini/google_gemini.dart';
 
 // --- List of calming, colorful particles for the background ---
 const List<Color> particleColors = [
@@ -144,13 +149,23 @@ class ConverseScreen extends StatefulWidget {
 class _ConverseScreenState extends State<ConverseScreen>
     with TickerProviderStateMixin {
   late AnimationController _orbController;
+  
+  // Services
+  final ElevenLabsService _elevenLabsService = ElevenLabsService();
+  final stt.SpeechToText _speechToText = stt.SpeechToText();
+  final GoogleGemini gemini = GoogleGemini(
+    apiKey: "", model: "gemini-2.5-flash"
+  );
 
-  bool _isRecording = false;
-  final List<Map<String, String>> _messages = [
-    {'type': 'aura', 'text': 'I understand. What specifically made you feel down?'},
-    {'type': 'user', 'text': 'I was feeling a bit down about work today.'},
-    {'type': 'aura', 'text': 'Hello, how can I help you today?'},
-  ];
+  // UI Controllers
+  final TextEditingController _textController = TextEditingController();
+  final FocusNode _textFocusNode = FocusNode();
+
+  // State variables
+  bool _isListening = false;
+  bool _speechEnabled = false;
+
+  final List<Map<String, String>> _messages = [];
 
   @override
   void initState() {
@@ -159,50 +174,198 @@ class _ConverseScreenState extends State<ConverseScreen>
       vsync: this,
       duration: const Duration(seconds: 2),
     );
+    _initSpeech();
   }
 
   @override
   void dispose() {
     _orbController.dispose();
+    _elevenLabsService.dispose();
+    _textController.dispose();
+    _textFocusNode.dispose();
     super.dispose();
   }
 
-  void _toggleRecording() {
-    setState(() {
-      _isRecording = !_isRecording;
-      if (_isRecording) {
-        _orbController.repeat(reverse: true);
-      } else {
-        _orbController.stop();
-        _orbController.animateTo(0, duration: const Duration(milliseconds: 300));
-      }
-    });
+  // Initialize speech-to-text
+  void _initSpeech() async {
+    try {
+      _speechEnabled = await _speechToText.initialize(
+        onStatus: (val) {
+          print('Speech status: $val');
+          if (val == 'notListening') {
+            setState(() {
+              _isListening = false;
+            });
+          }
+        },
+        onError: (val) {
+          print('Speech error: $val');
+          setState(() {
+            _isListening = false;
+          });
+        },
+      );
+      print('Speech recognition enabled: $_speechEnabled');
+    } catch (e) {
+      print('Failed to initialize speech recognition: $e');
+      _speechEnabled = false;
+    }
+    setState(() {});
   }
 
+  // Handle speech recognition results
+  void _onSpeechResult(result) {
+    print('Speech result: ${result.recognizedWords}');
+    print('Final result: ${result.finalResult}');
+
+    setState(() {
+      _textController.text = result.recognizedWords;
+    });
+
+    // If this is a final result and we have text, automatically send it
+    if (result.finalResult && result.recognizedWords.trim().isNotEmpty) {
+      print('Final speech result received, sending message');
+      // Add a small delay to ensure UI updates
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_isListening) {
+          _toggleInteraction(); // This will stop listening and send the message
+        }
+      });
+    }
+  }
+
+  // Send message (from text or speech)
+  void _sendMessage() async {
+    if (_textController.text.trim().isEmpty) return;
+
+    final userMessage = _textController.text.trim();
+    setState(() {
+      _messages.insert(0, {'type': 'user', 'text': userMessage});
+      _textController.clear();
+    });
+
+    // Generate Gemini response
+    try {
+      final value = await gemini.generateFromText(userMessage);
+      _handleNewAuraMessage(value.text);
+    } catch (e) {
+      print('Error generating Gemini response: $e');
+      _handleNewAuraMessage(
+        "I'm sorry, I'm having trouble responding right now. Please try again.",
+      );
+    }
+  }
+
+  // // Generate AI response using backend API
+  // Future<String> _generateAIResponse(String userMessage) async {
+  //   try {
+  //     const backendUrl = 'http://localhost:3000/api/chat/text';
+  //     const userId =
+  //         'flutter_user'; // You can make this dynamic based on actual user
+
+  //     final response = await http.post(
+  //       Uri.parse(backendUrl),
+  //       headers: {'Content-Type': 'application/json'},
+  //       body: '{"text": "$userMessage", "userId": "$userId"}',
+  //     );
+
+  //     print('AI API Response status: ${response.statusCode}');
+  //     print('AI API Response body: ${response.body}');
+
+  //     if (response.statusCode == 200) {
+  //       try {
+  //         // Parse the JSON response
+  //         final jsonData = json.decode(response.body);
+  //         return jsonData['botText'] ??
+  //             "I understand. How can I help you further?";
+  //       } catch (e) {
+  //         print('Error parsing JSON response: $e');
+  //         return "I understand. How can I help you further?";
+  //       }
+  //     } else {
+  //       print('Error from AI backend: ${response.statusCode}');
+  //       return "I understand your message. How can I assist you today?";
+  //     }
+  //   } catch (e) {
+  //     print('Failed to get AI response: $e');
+  //     return "I'm here to help. Can you tell me more about what's on your mind?";
+  //   }
+  // }
+
+  // This function now simulates the full conversation loop
+  void _handleNewAuraMessage(String text) {
+    setState(() {
+      _messages.insert(0, {'type': 'aura', 'text': text});
+    });
+    // NEW: When Aura "speaks", we call the service to generate and play the audio
+    _elevenLabsService.playTextAsSpeech(text);
+  }
+
+  void _toggleInteraction() async {
+    if (!_speechEnabled) {
+      print('Speech recognition not available');
+      return;
+    }
+
+    if (_isListening) {
+      // Stop listening
+      _orbController.stop();
+      _orbController.animateTo(0, duration: const Duration(milliseconds: 300));
+      await _speechToText.stop();
+
+      setState(() {
+        _isListening = false;
+      });
+
+      // If we have text from speech, send it
+      if (_textController.text.trim().isNotEmpty) {
+        print('Sending speech result: ${_textController.text}');
+        _sendMessage();
+      }
+    } else {
+      // Start listening
+      setState(() {
+        _isListening = true;
+      });
+      
+      _orbController.repeat(reverse: true);
+
+      await _speechToText.listen(
+        onResult: _onSpeechResult,
+        listenFor: const Duration(seconds: 30),
+        pauseFor: const Duration(seconds: 3),
+        partialResults: true,
+        localeId: 'en_US',
+        listenMode: stt.ListenMode.confirmation,
+      );
+    }
+  }
+
+  Future<void> sendGeminiMessage(String userMessage) async {
+    if (userMessage.trim().isEmpty) return;
+    setState(() {
+      _messages.insert(0, {'type': 'user', 'text': userMessage});
+      _textController.clear();
+    });
+    try {
+      final value = await gemini.generateFromText(userMessage);
+      setState(() {
+        _messages.insert(0, {'type': 'bot', 'text': value.text});
+      });
+    } catch (e) {
+      setState(() {
+        _messages.insert(0, {'type': 'bot', 'text': 'Error: $e'});
+      });
+    }
+  }
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // NEW: A pure white background color
-      backgroundColor: Colors.white,
       body: Stack(
         children: [
-          // The new colorful, blurred magical background
+          // Magical background
           const MagicalBackground(),
-
-          // NEW: The overlay is now more prominent to enhance the "behind the screen" effect.
-          Container(
-            decoration: BoxDecoration(
-              gradient: RadialGradient(
-                center: const Alignment(0.5, -0.5),
-                radius: 1.2,
-                colors: [
-                  Colors.white.withOpacity(0.6),
-                  Colors.white.withOpacity(0.9),
-                ],
-              ),
-            ),
-          ),
-          
+          // Foreground content
           SafeArea(
             child: Column(
               children: [
@@ -242,18 +405,105 @@ class _ConverseScreenState extends State<ConverseScreen>
                     },
                   ),
                 ),
+                // Text input area
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16.0,
+                    vertical: 8.0,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(25),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    Colors.white.withOpacity(0.4),
+                                    Colors.white.withOpacity(0.2),
+                                  ],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                ),
+                                borderRadius: BorderRadius.circular(25),
+                                border: Border.all(
+                                  color: Colors.white.withOpacity(0.3),
+                                  width: 1,
+                                ),
+                              ),
+                              child: TextField(
+                                controller: _textController,
+                                focusNode: _textFocusNode,
+                                decoration: const InputDecoration(
+                                  hintText: 'Type your message...',
+                                  border: InputBorder.none,
+                                  contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 12,
+                                  ),
+                                ),
+                                style: const TextStyle(
+                                  color: Color(0xFF3B4252),
+                                ),
+                                onSubmitted: (_) => _sendMessage(),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      GestureDetector(
+                        onTap: _sendMessage,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(25),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                            child: Container(
+                              width: 50,
+                              height: 50,
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    Colors.blue.withOpacity(0.6),
+                                    Colors.blue.withOpacity(0.4),
+                                  ],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                ),
+                                borderRadius: BorderRadius.circular(25),
+                                border: Border.all(
+                                  color: Colors.white.withOpacity(0.3),
+                                  width: 1,
+                                ),
+                              ),
+                              child: const Icon(
+                                Icons.send,
+                                color: Colors.white,
+                                size: 24,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 24.0, top: 16.0),
                   child: GestureDetector(
-                    onTap: _toggleRecording,
+                    onTap: _toggleInteraction,
                     child: AnimatedBuilder(
                       animation: _orbController,
                       builder: (context, child) {
-                        final pulse = _isRecording ? _orbController.value : 0.0;
+                        final pulse = _isListening ? _orbController.value : 0.0;
                         return CustomPaint(
                           painter: GlowingOrbPainter(
                             animationValue: pulse,
-                            color: _isRecording
+                            color:
+                                _isListening
                                 ? Theme.of(context).colorScheme.primary
                                 : const Color(0xFF4C566A),
                           ),
@@ -262,7 +512,7 @@ class _ConverseScreenState extends State<ConverseScreen>
                             height: 100,
                             child: Center(
                               child: Icon(
-                                _isRecording ? Icons.stop : Icons.mic,
+                                _isListening ? Icons.stop : Icons.mic,
                                 size: 50,
                                 color: Colors.white,
                               ),
@@ -273,6 +523,24 @@ class _ConverseScreenState extends State<ConverseScreen>
                     ),
                   ),
                 ),
+                // Speech status text
+                if (_speechEnabled)
+                  Text(
+                    _isListening
+                        ? 'Listening... Tap to stop'
+                        : 'Tap microphone to speak',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: const Color(0xFF4C566A).withOpacity(0.7),
+                    ),
+                  )
+                else
+                  Text(
+                    'Speech recognition not available',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Colors.red.withOpacity(0.7),
+                    ),
+                  ),
+                const SizedBox(height: 16),
               ],
             ),
           ),
@@ -346,4 +614,6 @@ class GlowingOrbPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
+
+
 

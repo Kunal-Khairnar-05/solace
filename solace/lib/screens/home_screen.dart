@@ -73,11 +73,11 @@ class _HomeScreenState extends State<HomeScreen> {
             activeIcon: Icon(Icons.history),
             label: 'History',
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.self_improvement_outlined),
-            activeIcon: Icon(Icons.self_improvement),
-            label: 'Sessions',
-          ),
+          // BottomNavigationBarItem(
+          //   icon: Icon(Icons.self_improvement_outlined),
+          //   activeIcon: Icon(Icons.self_improvement),
+          //   label: 'Sessions',
+          // ),
           BottomNavigationBarItem(
             icon: Icon(Icons.person_outline),
             activeIcon: Icon(Icons.person),

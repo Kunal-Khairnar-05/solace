@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<!-- Only needed for audio INPUT/recording -->
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
     <application
         android:label="solace"
         android:name="${applicationName}"
